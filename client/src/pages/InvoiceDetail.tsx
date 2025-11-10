@@ -1,0 +1,564 @@
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { Link, useParams } from "wouter";
+import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { useToast } from "@/hooks/use-toast";
+import { apiRequest, queryClient } from "@/lib/queryClient";
+import { isUnauthorizedError } from "@/lib/authUtils";
+import { useAuth } from "@/hooks/useAuth";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
+import { useState, useEffect } from "react";
+import { type Invoice, type InvoiceItem, type Product } from "@shared/schema";
+
+// Discount form schema
+const discountSchema = z.object({
+  discountPercentage: z.number().min(0, "Discount cannot be negative").max(100, "Discount cannot exceed 100%")
+});
+
+type DiscountForm = z.infer<typeof discountSchema>;
+
+export default function InvoiceDetail() {
+  const { toast } = useToast();
+  const { user } = useAuth();
+  const { id } = useParams();
+  const [isEditingDiscount, setIsEditingDiscount] = useState(false);
+
+  const { data: invoice, isLoading, error } = useQuery<Invoice & { items: (InvoiceItem & { product: Product })[] }>({
+    queryKey: [`/api/invoices/${id}`],
+    enabled: !!id,
+  });
+
+  const discountForm = useForm<DiscountForm>({
+    resolver: zodResolver(discountSchema),
+    defaultValues: {
+      discountPercentage: 0
+    }
+  });
+
+  // Reset form when invoice data changes - using useEffect to prevent re-render loops
+  useEffect(() => {
+    if (invoice && !discountForm.formState.isDirty) {
+      const currentDiscountPercentage = parseFloat(invoice.discountPercentage || "0");
+      discountForm.reset({
+        discountPercentage: currentDiscountPercentage
+      });
+    }
+  }, [invoice?.discountPercentage, discountForm.formState.isDirty]);
+
+  const updateStatusMutation = useMutation({
+    mutationFn: async (status: string) => {
+      const response = await apiRequest("PUT", `/api/invoices/${id}/status`, { status });
+      return response.json();
+    },
+    onSuccess: () => {
+      toast({
+        title: "Success",
+        description: "Invoice status updated successfully",
+      });
+      queryClient.invalidateQueries({ queryKey: [`/api/invoices/${id}`] });
+      queryClient.invalidateQueries({ queryKey: ["/api/invoices"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/metrics"] });
+    },
+    onError: (error) => {
+      if (isUnauthorizedError(error)) {
+        toast({
+          title: "Unauthorized",
+          description: "You are logged out. Logging in again...",
+          variant: "destructive",
+        });
+        setTimeout(() => {
+          window.location.href = "/api/login";
+        }, 500);
+        return;
+      }
+      toast({
+        title: "Error",
+        description: "Failed to update invoice status",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const updateDiscountMutation = useMutation({
+    mutationFn: async (discountPercentage: number) => {
+      console.log("Making API request with discount percentage:", discountPercentage, typeof discountPercentage);
+      
+      const requestBody = { discountPercentage };
+      console.log("Request body:", requestBody);
+      
+      const response = await apiRequest("PUT", `/api/invoices/${id}/discount`, requestBody);
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error("API error response:", response.status, errorText);
+        let errorData;
+        try {
+          errorData = JSON.parse(errorText);
+        } catch {
+          errorData = { message: errorText || `HTTP ${response.status}` };
+        }
+        throw { response: errorData, status: response.status };
+      }
+      
+      return response.json();
+    },
+    onSuccess: () => {
+      toast({
+        title: "Success",
+        description: "Discount updated successfully",
+      });
+      setIsEditingDiscount(false);
+      queryClient.invalidateQueries({ queryKey: [`/api/invoices/${id}`] });
+      queryClient.invalidateQueries({ queryKey: ["/api/invoices"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/metrics"] });
+    },
+    onError: (error: any) => {
+      console.error("Discount update error:", error);
+      
+      if (isUnauthorizedError(error)) {
+        toast({
+          title: "Unauthorized", 
+          description: "You are logged out. Logging in again...",
+          variant: "destructive",
+        });
+        setTimeout(() => {
+          window.location.href = "/api/login";
+        }, 500);
+        return;
+      }
+      
+      // Try to extract specific error message from API response
+      let errorMessage = "Failed to update discount";
+      try {
+        if (error.response) {
+          const responseData = error.response;
+          if (responseData.message) {
+            errorMessage = responseData.message;
+          } else if (responseData.errors && responseData.errors.length > 0) {
+            errorMessage = responseData.errors[0].message || errorMessage;
+          }
+        } else if (error.message) {
+          errorMessage = error.message;
+        }
+      } catch (parseError) {
+        console.error("Error parsing error message:", parseError);
+      }
+      
+      toast({
+        title: "Error",
+        description: errorMessage,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const onSubmitDiscount = (data: DiscountForm) => {
+    console.log("Form submission data:", data);
+    console.log("discountPercentage type:", typeof data.discountPercentage);
+    console.log("discountPercentage value:", data.discountPercentage);
+    
+    // Ensure it's a number for the API call
+    const numericDiscountPercentage = Number(data.discountPercentage);
+    console.log("Converted to number:", numericDiscountPercentage, typeof numericDiscountPercentage);
+    
+    if (isNaN(numericDiscountPercentage)) {
+      toast({
+        title: "Error",
+        description: "Please enter a valid discount percentage",
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    if (numericDiscountPercentage < 0 || numericDiscountPercentage > 100) {
+      toast({
+        title: "Error",
+        description: "Discount percentage must be between 0 and 100",
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    updateDiscountMutation.mutate(numericDiscountPercentage);
+  };
+
+  const cancelDiscountEdit = () => {
+    setIsEditingDiscount(false);
+    if (invoice) {
+      discountForm.reset({
+        discountPercentage: parseFloat(invoice.discountPercentage || "0")
+      });
+    }
+  };
+
+  const downloadPDF = async (invoiceId: string, invoiceNumber: string) => {
+    try {
+      const response = await apiRequest("POST", `/api/invoices/${invoiceId}/pdf`);
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `invoice-${invoiceNumber}.pdf`;
+      a.click();
+      window.URL.revokeObjectURL(url);
+      
+      toast({
+        title: "Success",
+        description: "PDF saved successfully",
+      });
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to download PDF",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handlePrint = () => {
+    // Hide action buttons and other non-printable elements
+    const actionButtons = document.querySelectorAll('[data-print-hide]');
+    actionButtons.forEach(el => (el as HTMLElement).style.display = 'none');
+    
+    // Print the page
+    window.print();
+    
+    // Restore hidden elements after print
+    setTimeout(() => {
+      actionButtons.forEach(el => (el as HTMLElement).style.display = '');
+    }, 100);
+  };
+
+  const formatDate = (date: string | Date) => {
+    return new Date(date).toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+  };
+
+  const formatCurrency = (amount: string | number) => {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD',
+    }).format(typeof amount === 'string' ? parseFloat(amount) : amount);
+  };
+
+  const getStatusBadge = (status: string) => {
+    return status === 'Processed' ? (
+      <Badge className="bg-green-100 text-green-800 hover:bg-green-100">Processed</Badge>
+    ) : (
+      <Badge variant="secondary">Pending</Badge>
+    );
+  };
+
+  const canProcessInvoice = () => {
+    return ['Admin', 'Manager'].includes(user?.role || '');
+  };
+
+  if (isLoading) {
+    return (
+      <div className="max-w-6xl mx-auto p-6 space-y-6">
+        <div className="flex items-center justify-between">
+          <Skeleton className="h-8 w-64" />
+          <Skeleton className="h-10 w-32" />
+        </div>
+        <Card>
+          <CardContent className="p-6 space-y-4">
+            <Skeleton className="h-6 w-full" />
+            <Skeleton className="h-6 w-3/4" />
+            <Skeleton className="h-6 w-1/2" />
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (error || !invoice) {
+    return (
+      <div className="max-w-6xl mx-auto p-6">
+        <Card>
+          <CardContent className="p-6 text-center">
+            <div className="text-center py-8">
+              <i className="fas fa-exclamation-circle text-destructive text-4xl mb-4"></i>
+              <p className="text-sm text-muted-foreground mb-4">
+                {error ? "Failed to load invoice" : "Invoice not found"}
+              </p>
+              <Link href="/invoices">
+                <Button variant="outline">
+                  <i className="fas fa-arrow-left w-4 h-4 mr-2"></i>
+                  Back to Invoices
+                </Button>
+              </Link>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-w-6xl mx-auto p-6 space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center space-x-4">
+          <Link href="/invoices">
+            <Button variant="ghost" size="icon" data-print-hide>
+              <i className="fas fa-arrow-left w-4 h-4"></i>
+            </Button>
+          </Link>
+          <div>
+            <h1 className="text-2xl font-bold text-foreground">
+              Invoice {invoice.invoiceNumber}
+            </h1>
+            <p className="text-muted-foreground">
+              Created on {invoice.createdAt ? formatDate(invoice.createdAt) : 'Unknown date'}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center space-x-2" data-print-hide>
+          {getStatusBadge(invoice.status || 'Unknown')}
+          <Button
+            variant="outline"
+            onClick={handlePrint}
+            data-testid="button-print"
+          >
+            <i className="fas fa-print w-4 h-4 mr-2"></i>
+            Print
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => downloadPDF(invoice.id, invoice.invoiceNumber)}
+            data-testid="button-save-pdf"
+          >
+            <i className="fas fa-file-pdf w-4 h-4 mr-2"></i>
+            Save as PDF
+          </Button>
+          {invoice.status === 'Pending' && canProcessInvoice() && (
+            <Button
+              onClick={() => updateStatusMutation.mutate('Processed')}
+              disabled={updateStatusMutation.isPending}
+              className="bg-blue-600 hover:bg-blue-700 text-white"
+              data-testid="button-process-invoice"
+            >
+              <i className="fas fa-check w-4 h-4 mr-2"></i>
+              {updateStatusMutation.isPending ? "Processing..." : "Mark as Processed"}
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {/* Customer Information */}
+      <Card>
+        <CardContent className="p-6">
+          <h3 className="text-lg font-semibold text-foreground mb-4">Customer Information</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <p className="text-sm text-muted-foreground">Customer Name</p>
+              <p className="font-medium text-foreground">{invoice.customerName}</p>
+            </div>
+            <div>
+              <p className="text-sm text-muted-foreground">Phone</p>
+              <p className="font-medium text-foreground">{invoice.customerPhone}</p>
+            </div>
+            {invoice.customerEmail && (
+              <div>
+                <p className="text-sm text-muted-foreground">Email</p>
+                <p className="font-medium text-foreground">{invoice.customerEmail}</p>
+              </div>
+            )}
+            {invoice.customerAddress && (
+              <div className="md:col-span-2">
+                <p className="text-sm text-muted-foreground">Address</p>
+                <p className="font-medium text-foreground">{invoice.customerAddress}</p>
+              </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Invoice Items */}
+      <Card>
+        <CardContent className="p-6">
+          <h3 className="text-lg font-semibold text-foreground mb-4">Invoice Items</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px]">
+              <thead>
+                <tr className="border-b border-border">
+                  <th className="px-3 py-3 text-left text-xs font-medium text-muted-foreground uppercase min-w-[180px]">Product</th>
+                  <th className="px-3 py-3 text-left text-xs font-medium text-muted-foreground uppercase">Color</th>
+                  <th className="px-3 py-3 text-left text-xs font-medium text-muted-foreground uppercase">Size</th>
+                  <th className="px-3 py-3 text-left text-xs font-medium text-muted-foreground uppercase">Manufacturer</th>
+                  <th className="px-3 py-3 text-left text-xs font-medium text-muted-foreground uppercase">Category</th>
+                  <th className="px-3 py-3 text-left text-xs font-medium text-muted-foreground uppercase">Qty</th>
+                  <th className="px-3 py-3 text-left text-xs font-medium text-muted-foreground uppercase">Unit Price</th>
+                  <th className="px-3 py-3 text-left text-xs font-medium text-muted-foreground uppercase">Total</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border">
+                {invoice.items?.map((item: any, index: number) => (
+                  <tr key={index} data-testid={`invoice-item-${index}`}>
+                    <td className="px-3 py-3 min-w-[180px]">
+                      <div>
+                        <p className="text-sm font-medium text-foreground">{item.product?.productName || 'Unknown Product'}</p>
+                        <p className="text-xs text-muted-foreground">{item.product?.productId}</p>
+                        {item.product?.description && (
+                          <p className="text-xs text-muted-foreground mt-1 max-w-[160px] line-clamp-2" title={item.product.description}>
+                            {item.product.description}
+                          </p>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-3 py-3">
+                      <span className="text-sm text-foreground">
+                        {item.product?.color || '-'}
+                      </span>
+                    </td>
+                    <td className="px-3 py-3">
+                      <span className="text-sm text-foreground">
+                        {item.product?.size || '-'}
+                      </span>
+                    </td>
+                    <td className="px-3 py-3">
+                      <span className="text-sm text-foreground">
+                        {item.product?.manufacturer || '-'}
+                      </span>
+                    </td>
+                    <td className="px-3 py-3">
+                      {item.product?.category ? (
+                        <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-primary/10 text-primary">
+                          {item.product.category}
+                        </span>
+                      ) : (
+                        <span className="text-sm text-muted-foreground">-</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-3 text-sm text-foreground font-medium">{item.quantity}</td>
+                    <td className="px-3 py-3 text-sm text-foreground">{formatCurrency(item.unitPrice)}</td>
+                    <td className="px-3 py-3 text-sm font-medium text-foreground">{formatCurrency(item.totalPrice)}</td>
+                  </tr>
+                )) || (
+                  <tr>
+                    <td colSpan={8} className="px-4 py-8 text-center text-muted-foreground">
+                      No items found
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Invoice Totals */}
+      <Card>
+        <CardContent className="p-6">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-foreground">Invoice Summary</h3>
+            {invoice.status === 'Pending' && !isEditingDiscount && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setIsEditingDiscount(true)}
+                data-testid="button-edit-discount"
+              >
+                <i className="fas fa-edit w-4 h-4 mr-2"></i>
+                Edit Discount
+              </Button>
+            )}
+          </div>
+          <div className="max-w-md ml-auto space-y-3">
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">Subtotal:</span>
+              <span className="font-medium text-foreground">{formatCurrency(invoice.subtotal || 0)}</span>
+            </div>
+            
+            {/* Discount Section - Enhanced with editing capability */}
+            {invoice.status === 'Pending' && isEditingDiscount ? (
+              <form onSubmit={discountForm.handleSubmit(onSubmitDiscount)} className="space-y-3">
+                <div className="flex items-center space-x-2">
+                  <Label htmlFor="discount-percentage" className="text-sm text-muted-foreground min-w-fit">
+                    Discount (%):
+                  </Label>
+                  <Input
+                    id="discount-percentage"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    max="100"
+                    className="w-20 h-8 text-sm"
+                    {...discountForm.register("discountPercentage", { valueAsNumber: true })}
+                    data-testid="input-discount-percentage"
+                  />
+                  <div className="flex space-x-1">
+                    <Button
+                      type="submit"
+                      size="sm"
+                      disabled={updateDiscountMutation.isPending}
+                      className="h-8 px-2 bg-blue-600 hover:bg-blue-700 text-white"
+                      data-testid="button-save-discount"
+                    >
+                      {updateDiscountMutation.isPending ? (
+                        <i className="fas fa-spinner fa-spin w-3 h-3"></i>
+                      ) : (
+                        <i className="fas fa-check w-3 h-3"></i>
+                      )}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={cancelDiscountEdit}
+                      className="h-8 px-2"
+                      data-testid="button-cancel-discount"
+                    >
+                      <i className="fas fa-times w-3 h-3"></i>
+                    </Button>
+                  </div>
+                </div>
+                {discountForm.formState.errors.discountPercentage && (
+                  <p className="text-sm text-destructive">
+                    {discountForm.formState.errors.discountPercentage.message}
+                  </p>
+                )}
+              </form>
+            ) : (
+              parseFloat(invoice.discountAmount || "0") > 0 && (
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">
+                    Discount ({(parseFloat(invoice.discountPercentage || "0") * 100).toFixed(1)}%):
+                  </span>
+                  <span className="font-medium text-foreground">-{formatCurrency(invoice.discountAmount || 0)}</span>
+                </div>
+              )
+            )}
+            
+            <div className="flex justify-between">
+              <span className="text-muted-foreground">
+                Tax ({(parseFloat(invoice.taxRate || "0") * 100).toFixed(1)}%):
+              </span>
+              <span className="font-medium text-foreground">{formatCurrency(invoice.taxAmount || 0)}</span>
+            </div>
+            <div className="flex justify-between text-lg font-bold text-foreground border-t border-border pt-3">
+              <span>Total:</span>
+              <span>{formatCurrency(invoice.total || 0)}</span>
+            </div>
+          </div>
+          
+          {invoice.notes && (
+            <div className="mt-6 pt-6 border-t border-border">
+              <p className="text-sm text-muted-foreground mb-2">Notes:</p>
+              <p className="text-sm text-foreground">{invoice.notes}</p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
